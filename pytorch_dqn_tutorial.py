@@ -44,3 +44,161 @@ class ReplayMemory(object):
 
     def __len__(self):
         return len(self.memory)
+
+class DQN(nn.Module):
+
+    def __init__(self):
+        super(DQN, self).__init__()
+        #policy
+        self.linear1 = nn.Linear(42*3, 42*2)
+        self.linear2 = nn.Linear(42*2, 42)
+
+    def forward(self, x):
+        x = F.relu(self.linear1(x))
+        return self.linear2(x)
+
+BATCH_SIZE = 128
+GAMMA = 0.999
+EPS_START = 0.9
+EPS_END = 0.05
+EPS_DECAY = 200
+TARGET_UPDATE = 8
+
+policy_net = DQN().to(device)
+target_net = DQN().to(device)
+target_net.load_state_dict(policy_net.state_dict())
+target_net.eval()
+
+optimizer = optim.RMSprop(policy_net.parameters())
+memory = ReplayMemory(10000)
+
+steps_done = 0
+
+def select_action(state):
+    global steps_done
+    state = torch.FloatTensor(state)
+    sample = random.random()
+    eps_threshold = EPS_END + (EPS_START - EPS_END) * math.exp(-1. * steps_done/EPS_DECAY)
+    steps_done += 1
+    if sample > eps_threshold:
+        with torch.no_grad():
+            #what does this do
+            return policy_net(state).argmax()
+    else:
+        return torch.FloatTensor([[random.randrange(42)]], device=device)
+
+num_episodes = 20000
+episode_durations = []
+episode_reward = [0]*num_episodes
+
+def plot_durations():
+    fi = open("pytorch_reward", "w")
+    for i, j in zip(range(len(episode_reward)),episode_reward):
+        fi.write(str(i)+" : "+str(j)+"s\n")
+    avg = sum(episode_reward)/len(episode_reward)
+    fi.write("average = "+str(avg)+"s\n")
+    from sklearn.linear_model import LinearRegression
+    lr = LinearRegression()
+    lr.fit(np.array(range(num_episodes)).reshape((-1,1)),episode_reward)
+    fi.write(str(lr.coef_))
+    fi.close()
+
+def optimize_model():
+    if len(memory) < BATCH_SIZE:
+        return
+    transitions = memory.sample(BATCH_SIZE)
+    # Transpose the batch (see http://stackoverflow.com/a/19343/3343043 for
+    # detailed explanation).
+    batch = Transition(*zip(*transitions))
+
+    # Compute a mask of non-final states and concatenate the batch elements
+    non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
+                                          batch.next_state)), device=device)
+    non_final_next_states = torch.cat([s for s in batch.next_state
+                                                if s is not None])
+    
+    state_batch = torch.cat(batch.state).view(128, -1)
+    action_batch = torch.cat([x.view(1) for x in batch.action])
+    reward_batch = torch.cat(batch.reward)
+
+    # Compute Q(s_t, a) - the model computes Q(s_t), then we select the
+    # columns of actions taken
+    state_action_values = policy_net(state_batch.float())
+    state_action_values = state_action_values.gather(1, action_batch.view(-1,1))
+
+    # Compute V(s_{t+1}) for all next states.
+    next_state_values = torch.zeros(BATCH_SIZE, device=device)
+    next_state_values[non_final_mask] = target_net(non_final_next_states.view(-1,126).float()).max(1)[0].detach()
+    # Compute the expected Q values
+    expected_state_action_values = (next_state_values * GAMMA) + reward_batch.float()
+
+    # Compute Huber loss
+    loss = F.smooth_l1_loss(state_action_values, expected_state_action_values.unsqueeze(1))
+
+    # Optimize the model
+    optimizer.zero_grad()
+    loss.backward()
+    for param in policy_net.parameters():
+        param.grad.data.clamp_(-1, 1)
+    optimizer.step()
+
+def input_from_obs(obs):
+    obs = obs[1]
+    #first 42 is the player, the next 2*42 the two others
+    first = [ 1 if x is not None and x.name == "Player" else 0 for x in obs.owners.values()]
+    second = [ 1 if x is not None and x.name == "Random_1" else 0 for x in obs.owners.values()]
+    third = [ 1 if x is not None and x.name == "Random_2" else 0 for x in obs.owners.values()]
+    return list(first)+list(second)+list(third)
+
+def id_to_territory(i,obs):
+    return list(obs[1].owners.keys())[i]
+
+for i_episode in range(num_episodes):
+    print("===> Episode ",i_episode," : ")
+    # Initialize the environment and state
+    obs = env.reset()
+    state = input_from_obs(obs)
+    for t in count():
+        # Select and perform an action
+        action = select_action(state)
+        action_id = int(action.item())
+        action = id_to_territory(action_id, obs)
+        #print(str(action))
+        obs, reward, done, _ = env.step(action)
+        episode_reward[i_episode] += reward
+        if None not in obs[1].owners.values():
+            while not done:
+                obs, reward, done, _ = env.step(random.choice([ x for x, y in obs[1].owners.items() if y is not None and y.name is "Player"]))
+                episode_reward[i_episode] += reward
+        reward = torch.tensor([int(reward)], device=device)
+
+        # Observe new state
+        if not done:
+            next_state = input_from_obs(obs)
+        else:
+            next_state = None
+            print("Reward : ",reward.item())
+
+        # Store the transition in memory
+        memory.push(torch.tensor(state) if state is not None else None,
+                    torch.tensor(action_id),
+                    torch.tensor(next_state) if next_state is not None else None,
+                    reward)
+
+        # Move to the next state
+        state = next_state
+
+        # Perform one step of the optimization (on the target network)
+        optimize_model()
+        if done:
+            episode_durations.append(t + 1)
+            break
+    # Update the target network
+    if i_episode % TARGET_UPDATE == 0:
+        target_net.load_state_dict(policy_net.state_dict())
+
+print('Complete')
+env.close()
+plot_durations()
+torch.save(policy_net, "policy_net.pt")
+torch.save(target_net, "target_net.pt")
