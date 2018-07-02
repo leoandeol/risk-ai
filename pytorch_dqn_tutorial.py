@@ -8,7 +8,8 @@ import matplotlib.pyplot as plt
 from collections import namedtuple
 from itertools import count
 from PIL import Image
-
+from time import gmtime, strftime
+from sklearn.linear_model import LinearRegression
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -17,10 +18,15 @@ import torchvision.transforms as T
 
 env = gym.make("DraftingRisk-v0")
 
+random.seed(1)
+env.seed(1)
+
 if "inline" in matplotlib.get_backend():
     from IPython import display
 
 plt.ion()
+
+moment = strftime("%Y-%m-%d--%H:%M:%S",gmtime())
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -49,13 +55,16 @@ class DQN(nn.Module):
 
     def __init__(self):
         super(DQN, self).__init__()
-        #policy
-        self.linear1 = nn.Linear(42*3, 42*2)
-        self.linear2 = nn.Linear(42*2, 42)
+        self.linear1 = nn.Linear(42*3, 42*4)
+        self.linear2 = nn.Linear(42*4, 42*3)
+        self.linear3 = nn.Linear(42*3, 42*2)
+        self.linear4 = nn.Linear(42*2, 42)
 
     def forward(self, x):
         x = F.relu(self.linear1(x))
-        return self.linear2(x)
+        x = F.relu(self.linear2(x))
+        x = F.relu(self.linear3(x))
+        return self.linear4(x)
 
 BATCH_SIZE = 128
 GAMMA = 0.999
@@ -69,39 +78,55 @@ target_net = DQN().to(device)
 target_net.load_state_dict(policy_net.state_dict())
 target_net.eval()
 
-optimizer = optim.RMSprop(policy_net.parameters())
+optimizer = optim.Adam(policy_net.parameters(),lr=0.1)
+loss_fn = nn.MSELoss()
 memory = ReplayMemory(10000)
+DATA_FOLDER = "data/"
 
 steps_done = 0
 
-def select_action(state):
+def select_action(state,obs):
     global steps_done
+    obs = obs[1].owners
     state = torch.FloatTensor(state)
     sample = random.random()
     eps_threshold = EPS_END + (EPS_START - EPS_END) * math.exp(-1. * steps_done/EPS_DECAY)
     steps_done += 1
+    #filter impossible cases
     if sample > eps_threshold:
         with torch.no_grad():
-            #what does this do
             return policy_net(state).argmax()
     else:
-        return torch.FloatTensor([[random.randrange(42)]], device=device)
+        return torch.FloatTensor([[random.choice([ i for i,v in zip(range(len(obs)),obs.values()) if v is None])]], device=device)
 
-num_episodes = 20000
+num_episodes = 1000
 episode_durations = []
 episode_reward = [0]*num_episodes
+losses = []
 
-def plot_durations():
-    fi = open("pytorch_reward", "w")
+def output_data():
+    rew = open(DATA_FOLDER+"pytorch_reward"+moment, "w")
     for i, j in zip(range(len(episode_reward)),episode_reward):
-        fi.write(str(i)+" : "+str(j)+"s\n")
+        rew.write(str(i)+";"+str(j)+"\n")
     avg = sum(episode_reward)/len(episode_reward)
-    fi.write("average = "+str(avg)+"s\n")
-    from sklearn.linear_model import LinearRegression
+    rew.write("average = "+str(avg)+"\n")
     lr = LinearRegression()
     lr.fit(np.array(range(num_episodes)).reshape((-1,1)),episode_reward)
-    fi.write(str(lr.coef_))
-    fi.close()
+    rew.write(str(lr.coef_))
+    rew.close()
+
+    lo = open(DATA_FOLDER+"pytorch_losses"+moment,"w")
+    for i, j in zip(range(len(losses)),losses):
+        lo.write(str(i)+";"+str(j)+"\n")
+    avg = sum(losses)/len(losses)
+    lo.write("average = "+str(avg)+"\n")
+    lr2 = LinearRegression()
+    lr2.fit(np.array(range(len(losses))).reshape((-1,1)),losses)
+    lo.write(str(lr2.coef_))
+    lo.close()
+    torch.save(policy_net, DATA_FOLDER+"policy_net"+moment+".pt")
+    torch.save(target_net, DATA_FOLDER+"target_net"+moment+".pt")
+
 
 def optimize_model():
     if len(memory) < BATCH_SIZE:
@@ -133,8 +158,8 @@ def optimize_model():
     expected_state_action_values = (next_state_values * GAMMA) + reward_batch.float()
 
     # Compute Huber loss
-    loss = F.smooth_l1_loss(state_action_values, expected_state_action_values.unsqueeze(1))
-
+    loss = loss_fn(state_action_values, expected_state_action_values.unsqueeze(1))
+    losses.append(loss.item())
     # Optimize the model
     optimizer.zero_grad()
     loss.backward()
@@ -160,15 +185,17 @@ for i_episode in range(num_episodes):
     state = input_from_obs(obs)
     for t in count():
         # Select and perform an action
-        action = select_action(state)
+        action = select_action(state,obs)
         action_id = int(action.item())
         action = id_to_territory(action_id, obs)
         #print(str(action))
         obs, reward, done, _ = env.step(action)
+        #reward /= 100
         episode_reward[i_episode] += reward
         if None not in obs[1].owners.values():
             while not done:
                 obs, reward, done, _ = env.step(random.choice([ x for x, y in obs[1].owners.items() if y is not None and y.name is "Player"]))
+                #reward /= 100
                 episode_reward[i_episode] += reward
         reward = torch.tensor([int(reward)], device=device)
 
@@ -177,7 +204,7 @@ for i_episode in range(num_episodes):
             next_state = input_from_obs(obs)
         else:
             next_state = None
-            print("Reward : ",reward.item())
+            print("Reward : ",episode_reward[i_episode])
 
         # Store the transition in memory
         memory.push(torch.tensor(state) if state is not None else None,
@@ -199,6 +226,4 @@ for i_episode in range(num_episodes):
 
 print('Complete')
 env.close()
-plot_durations()
-torch.save(policy_net, "policy_net.pt")
-torch.save(target_net, "target_net.pt")
+output_data()
