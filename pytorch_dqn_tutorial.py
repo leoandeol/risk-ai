@@ -74,9 +74,9 @@ EPS_DECAY = 200
 TARGET_UPDATE = 8
 
 policy_net = DQN().to(device)
-target_net = DQN().to(device)
-target_net.load_state_dict(policy_net.state_dict())
-target_net.eval()
+#target_net = DQN().to(device)
+#target_net.load_state_dict(policy_net.state_dict())
+#target_net.eval()
 
 optimizer = optim.Adam(policy_net.parameters(),lr=0.1)
 loss_fn = nn.MSELoss()
@@ -153,7 +153,7 @@ def optimize_model():
 
     # Compute V(s_{t+1}) for all next states.
     next_state_values = torch.zeros(BATCH_SIZE, device=device)
-    next_state_values[non_final_mask] = target_net(non_final_next_states.view(-1,126).float()).max(1)[0].detach()
+    next_state_values[non_final_mask] = policy_net(non_final_next_states.view(-1,126).float()).max(1)[0].detach()
     # Compute the expected Q values
     expected_state_action_values = (next_state_values * GAMMA) + reward_batch.float()
 
@@ -221,8 +221,8 @@ for i_episode in range(num_episodes):
             episode_durations.append(t + 1)
             break
     # Update the target network
-    if i_episode % TARGET_UPDATE == 0:
-        target_net.load_state_dict(policy_net.state_dict())
+    #if i_episode % TARGET_UPDATE == 0:
+    #    target_net.load_state_dict(policy_net.state_dict())
 
 print('Complete')
 env.close()
